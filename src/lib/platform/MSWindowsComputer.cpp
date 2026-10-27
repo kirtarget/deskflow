@@ -517,6 +517,27 @@ uint32_t MSWindowsComputer::activeSides()
 
 void MSWindowsComputer::warpCursor(int32_t x, int32_t y)
 {
+  // with monitors of different sizes the server may ask to warp onto a point
+  // of the bounding box that is not on any monitor (e.g. below a shorter
+  // monitor).  windows would clamp it onto that monitor's edge, which is now
+  // a jump edge too (see MSWindowsHook), so the cursor would bounce straight
+  // back.  move such points onto the nearest monitor, clear of its jump zone.
+  if (m_isPrimary) {
+    POINT pt{x, y};
+    if (MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) == nullptr) {
+      HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+      MONITORINFO info{};
+      info.cbSize = sizeof(info);
+      if (monitor != nullptr && GetMonitorInfo(monitor, &info)) {
+        const RECT &r = info.rcMonitor;
+        const int32_t margin = getJumpZoneSize() + 1;
+        x = std::clamp(x, static_cast<int32_t>(r.left) + margin, static_cast<int32_t>(r.right) - 1 - margin);
+        y = std::clamp(y, static_cast<int32_t>(r.top) + margin, static_cast<int32_t>(r.bottom) - 1 - margin);
+        LOG_DEBUG("warp target outside monitors, moved to %d,%d", x, y);
+      }
+    }
+  }
+
   // warp mouse
   warpCursorNoFlush(x, y);
 

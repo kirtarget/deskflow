@@ -10,6 +10,7 @@
 #include "base/Log.h"
 #include "deskflow/DisplayException.h"
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 
@@ -518,6 +519,56 @@ static LRESULT CALLBACK keyboardLLHook(int code, WPARAM wParam, LPARAM lParam)
 // events very early.  the earlier the better.
 //
 
+// Per-monitor jump edges.
+//
+// The server only treats the outer bounding box of the whole virtual desktop
+// as a jump zone.  With monitors of different heights (e.g. a landscape
+// monitor next to a taller portrait one) the bottom of the shorter monitor is
+// not on that bounding box, so the cursor can never leave from there.
+//
+// Here we treat any monitor edge that has no other monitor beyond it as an
+// outer edge: when the cursor reaches such an edge we report the position on
+// the matching side of the bounding box (keeping the other coordinate), so
+// the server's normal jump logic switches to the neighbour on that side.
+static bool noMonitorAt(LONG x, LONG y)
+{
+  POINT pt{x, y};
+  return MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) == nullptr;
+}
+
+static void mapMonitorEdgeToComputerEdge(int32_t &x, int32_t &y)
+{
+  if (g_wComputer <= 0 || g_hComputer <= 0) {
+    return;
+  }
+
+  POINT pt{x, y};
+  HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (monitor == nullptr || !GetMonitorInfo(monitor, &info)) {
+    return;
+  }
+  const RECT &r = info.rcMonitor;
+  const int32_t zone = g_zoneSize > 0 ? g_zoneSize : 1;
+
+  // coordinates clamped onto this monitor, used to probe beyond its edges
+  const LONG cx = std::clamp<LONG>(x, r.left, r.right - 1);
+  const LONG cy = std::clamp<LONG>(y, r.top, r.bottom - 1);
+
+  if (y >= r.bottom - zone && noMonitorAt(cx, r.bottom)) {
+    y = g_yComputer + g_hComputer - 1;
+  } else if (y < r.top + zone && noMonitorAt(cx, r.top - 1)) {
+    y = g_yComputer;
+  }
+
+  if (x >= r.right - zone && noMonitorAt(r.right, cy)) {
+    x = g_xComputer + g_wComputer - 1;
+  } else if (x < r.left + zone && noMonitorAt(r.left - 1, cy)) {
+    x = g_xComputer;
+  }
+}
+
 static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
 {
   switch (wParam) {
@@ -579,6 +630,8 @@ static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
       // of the computer then the mouse appears to get a bit jerky
       // near the edge.  we can either accept that or pass the bogus
       // events.  we'll try passing the events.
+      mapMonitorEdgeToComputerEdge(x, y);
+
       bool bogus = false;
       if (x < g_xComputer) {
         x = g_xComputer;
